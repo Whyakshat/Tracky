@@ -83,7 +83,7 @@ export default function LoginScreen({ onLoginSuccess }) {
         {/* Branding header */}
         <div className="flex flex-col items-center mb-8">
           <TrackyLogo textClassName="text-3xl" color="text-white" lineThickness="h-[2px]" className="mb-2" />
-          <p className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mt-1.5">Workspace Security Portal</p>
+          <p className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mt-1.5">Your Workspace Portal</p>
         </div>
 
         {error && (
