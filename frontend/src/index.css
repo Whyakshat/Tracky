@@ -75,3 +75,31 @@ input, select, textarea {
   transform: translateY(-2px);
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
 }
+
+/* Smooth tab content fade-in */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tab-content {
+  animation: fadeInUp 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Page-level fade in */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.page-fade {
+  animation: fadeIn 0.3s ease;
+}
+
+/* Pulse ring for loading states */
+@keyframes pulseRing {
+  0%   { transform: scale(0.95); opacity: 0.7; }
+  50%  { transform: scale(1.02); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.7; }
+}
+.pulse-ring {
+  animation: pulseRing 1.5s ease-in-out infinite;
+}

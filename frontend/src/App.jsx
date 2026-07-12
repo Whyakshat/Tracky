@@ -346,7 +346,7 @@ export default function App() {
 
         {/* -------------------- TAB CONTENT: DASHBOARD -------------------- */}
         {activeTab === 'dashboard' && (
-          <div>
+          <div className="tab-content">
             
             {/* Search and Filters panel */}
             <div className="bg-[#0d0d0f] border border-[#1c1c1e] p-5 rounded-2xl mb-8 shadow-lg space-y-4">
@@ -478,7 +478,7 @@ export default function App() {
 
         {/* -------------------- TAB CONTENT: DAILY LOGS CHECKLIST -------------------- */}
         {activeTab === 'daily' && (
-          <div className="bg-[#0d0d0f] border border-[#1c1c1e] rounded-3xl p-6 shadow-xl">
+          <div className="tab-content bg-[#0d0d0f] border border-[#1c1c1e] rounded-3xl p-6 shadow-xl">
             
             {/* Headline and Date selector */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-900 pb-5 mb-5 gap-4">
@@ -584,7 +584,7 @@ export default function App() {
 
         {/* -------------------- TAB CONTENT: PAYMENTS SHEET -------------------- */}
         {activeTab === 'payments' && (
-          <div className="bg-[#0d0d0f] border border-[#1c1c1e] rounded-3xl p-6 shadow-xl space-y-6">
+          <div className="tab-content bg-[#0d0d0f] border border-[#1c1c1e] rounded-3xl p-6 shadow-xl space-y-6">
             
             {/* Header + summary totals */}
             <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-slate-900 pb-5 gap-4">
@@ -686,16 +686,16 @@ export default function App() {
 
         {/* -------------------- TAB CONTENT: EXPENSES -------------------- */}
         {activeTab === 'expenses' && (
-          <ExpensesTab stats={stats} onUpdate={fetchData} />
+          <div className="tab-content"><ExpensesTab stats={stats} onUpdate={fetchData} /></div>
         )}
 
         {/* -------------------- TAB CONTENT: SETTINGS -------------------- */}
         {activeTab === 'settings' && (
-          <SettingsTab 
+          <div className="tab-content"><SettingsTab 
             user={user} 
             onUpdateSettings={handleUpdateSettings} 
             onLogout={handleLogout} 
-          />
+          /></div>
         )}
 
       </main>
