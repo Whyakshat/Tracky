@@ -1,4 +1,4 @@
-# ⚡ Tracky — The Cyber-Dark Meal & Subscription Tracker
+# ⚡ Tracky — The Tracker
 
 Welcome to **Tracky**! If you run a tiffin service, meal prep startup, or any subscription-based business, Tracky is built for you. We designed it with a clean, cyber-dark theme, high-contrast monospace stats, and premium animations. 
 
