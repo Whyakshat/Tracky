@@ -1,83 +1,111 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
+import dotenv from 'dotenv';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+dotenv.config();
 
-const dbPath = path.join(__dirname, 'tracky.db');
-const db = new Database(dbPath, { verbose: console.log });
+const { Pool } = pg;
 
-// Enable foreign keys
-db.pragma('foreign_keys = ON');
+// Connection pool configuration
+// Uses the DATABASE_URL environment variable provided by Neon or Render
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' || process.env.DATABASE_URL?.includes('neon.tech') 
+    ? { rejectUnauthorized: false } 
+    : false
+});
 
-// Initialize schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT,
-    google_id TEXT,
-    business_name TEXT NOT NULL DEFAULT 'My Tracker HQ',
-    tracking_label TEXT NOT NULL DEFAULT 'Meal',
-    currency TEXT NOT NULL DEFAULT '₹',
-    created_at TEXT NOT NULL
-  );
+// Initialize schema (runs once on startup)
+export const initializeDatabase = async () => {
+  const client = await pool.connect();
+  try {
+    console.log('Initializing PostgreSQL database schemas...');
+    
+    // Create Users table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password_hash TEXT,
+        google_id TEXT,
+        business_name VARCHAR(255) NOT NULL DEFAULT 'My Tracker HQ',
+        tracking_label VARCHAR(255) NOT NULL DEFAULT 'Meal',
+        currency VARCHAR(50) NOT NULL DEFAULT '₹',
+        created_at VARCHAR(100) NOT NULL
+      );
+    `);
 
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    expires_at TEXT NOT NULL,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
+    // Create Sessions table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        token VARCHAR(255) PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at VARCHAR(100) NOT NULL
+      );
+    `);
 
-  CREATE TABLE IF NOT EXISTS customers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    address TEXT NOT NULL,
-    subscription_type TEXT NOT NULL,
-    plan_type TEXT NOT NULL,
-    plan_start_date TEXT NOT NULL,
-    next_delivery_date TEXT,
-    plan_duration INTEGER NOT NULL,
-    plan_amount REAL NOT NULL,
-    amount_paid REAL DEFAULT 0,
-    notes TEXT,
-    active INTEGER DEFAULT 1,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
+    // Create Customers table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS customers (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(255) NOT NULL,
+        phone VARCHAR(50) NOT NULL,
+        address TEXT NOT NULL,
+        subscription_type VARCHAR(100) NOT NULL,
+        plan_type VARCHAR(100) NOT NULL,
+        plan_start_date VARCHAR(50) NOT NULL,
+        next_delivery_date VARCHAR(50),
+        plan_duration INTEGER NOT NULL,
+        plan_amount DECIMAL(10, 2) NOT NULL,
+        amount_paid DECIMAL(10, 2) DEFAULT 0,
+        notes TEXT,
+        active INTEGER DEFAULT 1
+      );
+    `);
 
-  CREATE TABLE IF NOT EXISTS meal_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    customer_id INTEGER NOT NULL,
-    log_date TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('delivered', 'skipped', 'extra')),
-    note TEXT,
-    UNIQUE(customer_id, log_date, status),
-    FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE
-  );
+    // Create Meal Logs table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS meal_logs (
+        id SERIAL PRIMARY KEY,
+        customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        log_date VARCHAR(50) NOT NULL,
+        status VARCHAR(50) NOT NULL CHECK(status IN ('delivered', 'skipped', 'extra')),
+        note TEXT,
+        UNIQUE(customer_id, log_date, status)
+      );
+    `);
 
-  CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    customer_id INTEGER NOT NULL,
-    amount REAL NOT NULL,
-    payment_date TEXT NOT NULL,
-    notes TEXT,
-    FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE
-  );
+    // Create Payments table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS payments (
+        id SERIAL PRIMARY KEY,
+        customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        amount DECIMAL(10, 2) NOT NULL,
+        payment_date VARCHAR(50) NOT NULL,
+        notes TEXT
+      );
+    `);
 
-  CREATE TABLE IF NOT EXISTS expenses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    amount REAL NOT NULL,
-    expense_date TEXT NOT NULL,
-    category TEXT DEFAULT 'Other',
-    notes TEXT,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-`);
+    // Create Expenses table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS expenses (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        amount DECIMAL(10, 2) NOT NULL,
+        expense_date VARCHAR(50) NOT NULL,
+        category VARCHAR(100) DEFAULT 'Other',
+        notes TEXT
+      );
+    `);
 
-export default db;
+    console.log('PostgreSQL database schemas verified successfully.');
+  } catch (error) {
+    console.error('Failed to initialize database schema:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+export default pool;

@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import db from './database.js';
+import db, { initializeDatabase } from './database.js';
 
 dotenv.config();
 
@@ -18,7 +18,7 @@ app.use(helmet());
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // Limit each IP to 200 requests per `window` (here, per 15 minutes)
+  max: 200, // Limit each IP to 200 requests per 15 minutes
   message: { error: 'Too many requests from this IP, please try again later.' }
 });
 app.use('/api/', apiLimiter);
@@ -57,7 +57,7 @@ const generateSessionToken = () => {
 };
 
 // --- AUTHENTICATION MIDDLEWARE ---
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -65,7 +65,8 @@ const authMiddleware = (req, res, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
+    const sessionRes = await db.query('SELECT * FROM sessions WHERE token = $1', [token]);
+    const session = sessionRes.rows[0];
 
     if (!session) {
       return res.status(401).json({ error: 'Unauthorized: Invalid session token' });
@@ -73,12 +74,13 @@ const authMiddleware = (req, res, next) => {
 
     const now = new Date().toISOString();
     if (session.expires_at < now) {
-      db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+      await db.query('DELETE FROM sessions WHERE token = $1', [token]);
       return res.status(401).json({ error: 'Unauthorized: Session expired' });
     }
 
     // Load user settings details
-    const user = db.prepare('SELECT id, email, business_name, tracking_label, currency FROM users WHERE id = ?').get(session.user_id);
+    const userRes = await db.query('SELECT id, email, business_name, tracking_label, currency FROM users WHERE id = $1', [session.user_id]);
+    const user = userRes.rows[0];
     if (!user) {
       return res.status(401).json({ error: 'Unauthorized: User account not found' });
     }
@@ -96,7 +98,7 @@ const authMiddleware = (req, res, next) => {
 // ==========================================
 
 // 1. POST /api/auth/signup - Register new business/personal tracker
-app.post('/api/auth/signup', (req, res) => {
+app.post('/api/auth/signup', async (req, res) => {
   try {
     const { email, password, business_name } = req.body;
 
@@ -105,8 +107,8 @@ app.post('/api/auth/signup', (req, res) => {
     }
 
     // Check if email already registered
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
-    if (existing) {
+    const existingRes = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingRes.rows.length > 0) {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
@@ -115,21 +117,22 @@ app.post('/api/auth/signup', (req, res) => {
     const defaultBusiness = business_name || `${email.split('@')[0]}'s Tracker`;
 
     // Create user
-    const info = db.prepare(`
+    const insertRes = await db.query(`
       INSERT INTO users (email, password_hash, business_name, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(email, password_hash, defaultBusiness, created_at);
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `, [email, password_hash, defaultBusiness, created_at]);
 
-    const userId = info.lastInsertRowid;
+    const userId = insertRes.rows[0].id;
 
     // Log them in immediately (generate session)
     const token = generateSessionToken();
     const expires_at = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 Days
 
-    db.prepare(`
+    await db.query(`
       INSERT INTO sessions (token, user_id, expires_at)
-      VALUES (?, ?, ?)
-    `).run(token, userId, expires_at);
+      VALUES ($1, $2, $3)
+    `, [token, userId, expires_at]);
 
     res.status(201).json({
       token,
@@ -147,7 +150,7 @@ app.post('/api/auth/signup', (req, res) => {
 });
 
 // 2. POST /api/auth/login - Credentials login
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -155,7 +158,8 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(400).json({ error: 'Missing email or password' });
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    const userRes = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = userRes.rows[0];
 
     if (!user || !verifyPassword(password, user.password_hash)) {
       return res.status(401).json({ error: 'Invalid email or password' });
@@ -165,10 +169,10 @@ app.post('/api/auth/login', (req, res) => {
     const token = generateSessionToken();
     const expires_at = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 Days
 
-    db.prepare(`
+    await db.query(`
       INSERT INTO sessions (token, user_id, expires_at)
-      VALUES (?, ?, ?)
-    `).run(token, user.id, expires_at);
+      VALUES ($1, $2, $3)
+    `, [token, user.id, expires_at]);
 
     res.json({
       token,
@@ -203,20 +207,22 @@ app.post('/api/auth/google', async (req, res) => {
     const { email, sub: google_id, name } = payload;
 
     // Check if user exists by Google ID or email
-    let user = db.prepare('SELECT * FROM users WHERE google_id = ? OR email = ?').get(google_id, email);
+    const userRes = await db.query('SELECT * FROM users WHERE google_id = $1 OR email = $2', [google_id, email]);
+    let user = userRes.rows[0];
 
     if (!user) {
       // Create a new user with Google profile
       const defaultBusiness = name ? `${name}'s Tracker` : `${email.split('@')[0]}'s Tracker`;
       const created_at = new Date().toISOString();
       
-      const info = db.prepare(`
+      const insertRes = await db.query(`
         INSERT INTO users (email, google_id, business_name, created_at)
-        VALUES (?, ?, ?, ?)
-      `).run(email, google_id, defaultBusiness, created_at);
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+      `, [email, google_id, defaultBusiness, created_at]);
 
       user = {
-        id: info.lastInsertRowid,
+        id: insertRes.rows[0].id,
         email,
         business_name: defaultBusiness,
         tracking_label: 'Meal',
@@ -224,7 +230,7 @@ app.post('/api/auth/google', async (req, res) => {
       };
     } else if (!user.google_id) {
       // Link Google ID to existing email account
-      db.prepare('UPDATE users SET google_id = ? WHERE id = ?').run(google_id, user.id);
+      await db.query('UPDATE users SET google_id = $1 WHERE id = $2', [google_id, user.id]);
       user.google_id = google_id;
     }
 
@@ -232,10 +238,10 @@ app.post('/api/auth/google', async (req, res) => {
     const token = generateSessionToken();
     const expires_at = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 Days
 
-    db.prepare(`
+    await db.query(`
       INSERT INTO sessions (token, user_id, expires_at)
-      VALUES (?, ?, ?)
-    `).run(token, user.id, expires_at);
+      VALUES ($1, $2, $3)
+    `, [token, user.id, expires_at]);
 
     res.json({
       token,
@@ -253,12 +259,12 @@ app.post('/api/auth/google', async (req, res) => {
 });
 
 // 4. POST /api/auth/logout - Invalidate session token
-app.post('/api/auth/logout', (req, res) => {
+app.post('/api/auth/logout', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.split(' ')[1];
-      db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+      await db.query('DELETE FROM sessions WHERE token = $1', [token]);
     }
     res.json({ message: 'Logged out successfully' });
   } catch (error) {
@@ -275,7 +281,7 @@ app.get('/api/user/settings', authMiddleware, (req, res) => {
   res.json({ user: req.user });
 });
 
-app.put('/api/user/settings', authMiddleware, (req, res) => {
+app.put('/api/user/settings', authMiddleware, async (req, res) => {
   try {
     const { business_name, tracking_label, currency } = req.body;
 
@@ -283,11 +289,11 @@ app.put('/api/user/settings', authMiddleware, (req, res) => {
       return res.status(400).json({ error: 'Missing business_name, tracking_label, or currency' });
     }
 
-    db.prepare(`
+    await db.query(`
       UPDATE users 
-      SET business_name = ?, tracking_label = ?, currency = ?
-      WHERE id = ?
-    `).run(business_name, tracking_label, currency, req.user.id);
+      SET business_name = $1, tracking_label = $2, currency = $3
+      WHERE id = $4
+    `, [business_name, tracking_label, currency, req.user.id]);
 
     res.json({
       message: 'Settings updated successfully',
@@ -309,7 +315,7 @@ app.put('/api/user/settings', authMiddleware, (req, res) => {
 // ==========================================
 
 // 5. GET /api/customers - Get all customers for the logged-in user
-app.get('/api/customers', authMiddleware, (req, res) => {
+app.get('/api/customers', authMiddleware, async (req, res) => {
   try {
     const query = `
       SELECT 
@@ -317,7 +323,7 @@ app.get('/api/customers', authMiddleware, (req, res) => {
         COALESCE(l.delivered_count, 0) as delivered_count,
         COALESCE(l.skipped_count, 0) as skipped_count,
         COALESCE(l.extra_count, 0) as extra_count,
-        MAX(0, c.plan_duration - COALESCE(l.delivered_count, 0) - COALESCE(l.skipped_count, 0)) as pending_meals,
+        GREATEST(0, c.plan_duration - COALESCE(l.delivered_count, 0) - COALESCE(l.skipped_count, 0)) as pending_meals,
         (c.plan_amount - c.amount_paid) as pending_payment,
         CASE 
           WHEN (c.plan_amount - c.amount_paid) <= 0 THEN 'Paid'
@@ -334,11 +340,21 @@ app.get('/api/customers', authMiddleware, (req, res) => {
         FROM meal_logs
         GROUP BY customer_id
       ) l ON c.id = l.customer_id
-      WHERE c.user_id = ?
+      WHERE c.user_id = $1
       ORDER BY c.active DESC, c.name ASC
     `;
-    const customers = db.prepare(query).all(req.user.id);
-    const formatted = customers.map(c => ({ ...c, active: !!c.active }));
+    const custRes = await db.query(query, [req.user.id]);
+    const formatted = custRes.rows.map(c => ({ 
+      ...c, 
+      active: !!c.active,
+      plan_amount: parseFloat(c.plan_amount),
+      amount_paid: parseFloat(c.amount_paid),
+      pending_payment: parseFloat(c.pending_payment),
+      pending_meals: parseInt(c.pending_meals),
+      delivered_count: parseInt(c.delivered_count),
+      skipped_count: parseInt(c.skipped_count),
+      extra_count: parseInt(c.extra_count)
+    }));
     res.json(formatted);
   } catch (error) {
     console.error('Error fetching customers:', error);
@@ -347,7 +363,7 @@ app.get('/api/customers', authMiddleware, (req, res) => {
 });
 
 // 6. GET /api/customers/:id - Get scoped single customer with details
-app.get('/api/customers/:id', authMiddleware, (req, res) => {
+app.get('/api/customers/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     
@@ -357,7 +373,7 @@ app.get('/api/customers/:id', authMiddleware, (req, res) => {
         COALESCE(l.delivered_count, 0) as delivered_count,
         COALESCE(l.skipped_count, 0) as skipped_count,
         COALESCE(l.extra_count, 0) as extra_count,
-        MAX(0, c.plan_duration - COALESCE(l.delivered_count, 0) - COALESCE(l.skipped_count, 0)) as pending_meals,
+        GREATEST(0, c.plan_duration - COALESCE(l.delivered_count, 0) - COALESCE(l.skipped_count, 0)) as pending_meals,
         (c.plan_amount - c.amount_paid) as pending_payment,
         CASE 
           WHEN (c.plan_amount - c.amount_paid) <= 0 THEN 'Paid'
@@ -374,29 +390,41 @@ app.get('/api/customers/:id', authMiddleware, (req, res) => {
         FROM meal_logs
         GROUP BY customer_id
       ) l ON c.id = l.customer_id
-      WHERE c.id = ? AND c.user_id = ?
+      WHERE c.id = $1 AND c.user_id = $2
     `;
-    const customer = db.prepare(customerQuery).get(id, req.user.id);
+    const custRes = await db.query(customerQuery, [id, req.user.id]);
+    const customer = custRes.rows[0];
     
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
     
     customer.active = !!customer.active;
+    customer.plan_amount = parseFloat(customer.plan_amount);
+    customer.amount_paid = parseFloat(customer.amount_paid);
+    customer.pending_payment = parseFloat(customer.pending_payment);
+    customer.pending_meals = parseInt(customer.pending_meals);
+    customer.delivered_count = parseInt(customer.delivered_count);
+    customer.skipped_count = parseInt(customer.skipped_count);
+    customer.extra_count = parseInt(customer.extra_count);
     
-    const logs = db.prepare(`
+    const logsRes = await db.query(`
       SELECT * FROM meal_logs 
-      WHERE customer_id = ? 
+      WHERE customer_id = $1 
       ORDER BY log_date DESC
-    `).all(id);
+    `, [id]);
     
-    const payments = db.prepare(`
+    const paymentsRes = await db.query(`
       SELECT * FROM payments 
-      WHERE customer_id = ? 
+      WHERE customer_id = $1 
       ORDER BY payment_date DESC
-    `).all(id);
+    `, [id]);
     
-    res.json({ customer, logs, payments });
+    res.json({ 
+      customer, 
+      logs: logsRes.rows, 
+      payments: paymentsRes.rows.map(p => ({ ...p, amount: parseFloat(p.amount) }))
+    });
   } catch (error) {
     console.error('Error fetching customer details:', error);
     res.status(500).json({ error: 'Failed to fetch customer details' });
@@ -404,7 +432,8 @@ app.get('/api/customers/:id', authMiddleware, (req, res) => {
 });
 
 // 7. POST /api/customers - Add a customer linked to user_id
-app.post('/api/customers', authMiddleware, (req, res) => {
+app.post('/api/customers', authMiddleware, async (req, res) => {
+  const client = await db.connect();
   try {
     const {
       name, phone, address, subscription_type, plan_type,
@@ -416,44 +445,47 @@ app.post('/api/customers', authMiddleware, (req, res) => {
       return res.status(400).json({ error: 'Missing required customer fields' });
     }
     
-    const paidVal = amount_paid || 0;
+    const paidVal = parseFloat(amount_paid) || 0;
     const activeVal = active ? 1 : 0;
     
-    const insertTransaction = db.transaction(() => {
-      const info = db.prepare(`
-        INSERT INTO customers (
-          user_id, name, phone, address, subscription_type, plan_type,
-          plan_start_date, next_delivery_date, plan_duration,
-          plan_amount, amount_paid, notes, active
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        req.user.id, name, phone, address, subscription_type, plan_type,
-        plan_start_date, next_delivery_date || null, plan_duration,
-        plan_amount, paidVal, notes || '', activeVal
-      );
-      
-      const newCustomerId = info.lastInsertRowid;
-      
-      if (paidVal > 0) {
-        db.prepare(`
-          INSERT INTO payments (customer_id, amount, payment_date, notes)
-          VALUES (?, ?, ?, ?)
-        `).run(newCustomerId, paidVal, plan_start_date, 'Initial payment recorded during setup');
-      }
-      
-      return newCustomerId;
-    });
+    await client.query('BEGIN');
     
-    const newId = insertTransaction();
-    res.status(201).json({ id: newId, message: 'Customer created successfully' });
+    const insertRes = await client.query(`
+      INSERT INTO customers (
+        user_id, name, phone, address, subscription_type, plan_type,
+        plan_start_date, next_delivery_date, plan_duration,
+        plan_amount, amount_paid, notes, active
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      RETURNING id
+    `, [
+      req.user.id, name, phone, address, subscription_type, plan_type,
+      plan_start_date, next_delivery_date || null, parseInt(plan_duration),
+      parseFloat(plan_amount), paidVal, notes || '', activeVal
+    ]);
+    
+    const newCustomerId = insertRes.rows[0].id;
+    
+    if (paidVal > 0) {
+      await client.query(`
+        INSERT INTO payments (customer_id, amount, payment_date, notes)
+        VALUES ($1, $2, $3, $4)
+      `, [newCustomerId, paidVal, plan_start_date, 'Initial payment recorded during setup']);
+    }
+    
+    await client.query('COMMIT');
+    res.status(201).json({ id: newCustomerId, message: 'Customer created successfully' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error creating customer:', error);
     res.status(500).json({ error: 'Failed to create customer' });
+  } finally {
+    client.release();
   }
 });
 
 // 8. PUT /api/customers/:id - Update scoped customer
-app.put('/api/customers/:id', authMiddleware, (req, res) => {
+app.put('/api/customers/:id', authMiddleware, async (req, res) => {
+  const client = await db.connect();
   try {
     const { id } = req.params;
     const {
@@ -467,80 +499,84 @@ app.put('/api/customers/:id', authMiddleware, (req, res) => {
     }
     
     const activeVal = active ? 1 : 0;
-    const paidVal = amount_paid || 0;
+    const paidVal = parseFloat(amount_paid) || 0;
     
     // Check owner
-    const currentCustomer = db.prepare('SELECT amount_paid FROM customers WHERE id = ? AND user_id = ?').get(id, req.user.id);
+    const currentRes = await client.query('SELECT amount_paid FROM customers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+    const currentCustomer = currentRes.rows[0];
     if (!currentCustomer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
     
-    const diff = paidVal - currentCustomer.amount_paid;
+    const diff = paidVal - parseFloat(currentCustomer.amount_paid);
     
-    const updateTransaction = db.transaction(() => {
-      db.prepare(`
-        UPDATE customers SET
-          name = ?, phone = ?, address = ?, subscription_type = ?, plan_type = ?,
-          plan_start_date = ?, next_delivery_date = ?, plan_duration = ?,
-          plan_amount = ?, amount_paid = ?, notes = ?, active = ?
-        WHERE id = ? AND user_id = ?
-      `).run(
-        name, phone, address, subscription_type, plan_type,
-        plan_start_date, next_delivery_date || null, plan_duration,
-        plan_amount, paidVal, notes || '', activeVal, id, req.user.id
-      );
-      
-      if (diff !== 0) {
-        db.prepare(`
-          INSERT INTO payments (customer_id, amount, payment_date, notes)
-          VALUES (?, ?, ?, ?)
-        `).run(
-          id, 
-          diff, 
-          new Date().toISOString().split('T')[0], 
-          `Adjustment entry due to profile update`
-        );
-      }
-    });
+    await client.query('BEGIN');
     
-    updateTransaction();
+    await client.query(`
+      UPDATE customers SET
+        name = $1, phone = $2, address = $3, subscription_type = $4, plan_type = $5,
+        plan_start_date = $6, next_delivery_date = $7, plan_duration = $8,
+        plan_amount = $9, amount_paid = $10, notes = $11, active = $12
+      WHERE id = $13 AND user_id = $14
+    `, [
+      name, phone, address, subscription_type, plan_type,
+      plan_start_date, next_delivery_date || null, parseInt(plan_duration),
+      parseFloat(plan_amount), paidVal, notes || '', activeVal, id, req.user.id
+    ]);
+    
+    if (diff !== 0) {
+      await client.query(`
+        INSERT INTO payments (customer_id, amount, payment_date, notes)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        id, 
+        diff, 
+        new Date().toISOString().split('T')[0], 
+        `Adjustment entry due to profile update`
+      ]);
+    }
+    
+    await client.query('COMMIT');
     res.json({ message: 'Customer updated successfully' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error updating customer:', error);
     res.status(500).json({ error: 'Failed to update customer' });
+  } finally {
+    client.release();
   }
 });
 
 // 9. DELETE /api/customers/:id - Delete customer
-app.delete('/api/customers/:id', authMiddleware, (req, res) => {
+app.delete('/api/customers/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    const result = db.prepare('DELETE FROM customers WHERE id = ? AND user_id = ?').run(id, req.user.id);
+    const result = await db.query('DELETE FROM customers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
     
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Customer not found' });
     }
     
     res.json({ message: 'Customer deleted successfully' });
   } catch (error) {
     console.error('Error deleting customer:', error);
-    res.status(550).json({ error: 'Failed to delete customer' });
+    res.status(500).json({ error: 'Failed to delete customer' });
   }
 });
 
 // 10. GET /api/customers/:id/logs - Fetch customer logs
-app.get('/api/customers/:id/logs', authMiddleware, (req, res) => {
+app.get('/api/customers/:id/logs', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     
     // Check owner
-    const customer = db.prepare('SELECT id FROM customers WHERE id = ? AND user_id = ?').get(id, req.user.id);
-    if (!customer) {
+    const customerRes = await db.query('SELECT id FROM customers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+    if (customerRes.rows.length === 0) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    const logs = db.prepare('SELECT * FROM meal_logs WHERE customer_id = ? ORDER BY log_date DESC').all(id);
-    res.json(logs);
+    const logsRes = await db.query('SELECT * FROM meal_logs WHERE customer_id = $1 ORDER BY log_date DESC', [id]);
+    res.json(logsRes.rows);
   } catch (error) {
     console.error('Error fetching logs:', error);
     res.status(500).json({ error: 'Failed to fetch logs' });
@@ -548,7 +584,8 @@ app.get('/api/customers/:id/logs', authMiddleware, (req, res) => {
 });
 
 // 11. POST /api/customers/:id/logs - Add log
-app.post('/api/customers/:id/logs', authMiddleware, (req, res) => {
+app.post('/api/customers/:id/logs', authMiddleware, async (req, res) => {
+  const client = await db.connect();
   try {
     const { id } = req.params;
     const { log_date, status, note } = req.body;
@@ -558,41 +595,41 @@ app.post('/api/customers/:id/logs', authMiddleware, (req, res) => {
     }
     
     // Check owner
-    const customer = db.prepare('SELECT id FROM customers WHERE id = ? AND user_id = ?').get(id, req.user.id);
-    if (!customer) {
+    const customerRes = await client.query('SELECT id FROM customers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+    if (customerRes.rows.length === 0) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    const upsertTransaction = db.transaction(() => {
-      db.prepare('DELETE FROM meal_logs WHERE customer_id = ? AND log_date = ?').run(id, log_date);
-      const info = db.prepare(`
-        INSERT INTO meal_logs (customer_id, log_date, status, note)
-        VALUES (?, ?, ?, ?)
-      `).run(id, log_date, status, note || '');
-      
-      return info.lastInsertRowid;
-    });
+    await client.query('BEGIN');
+    await client.query('DELETE FROM meal_logs WHERE customer_id = $1 AND log_date = $2', [id, log_date]);
+    const info = await client.query(`
+      INSERT INTO meal_logs (customer_id, log_date, status, note)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `, [id, log_date, status, note || '']);
     
-    const newLogId = upsertTransaction();
-    res.status(201).json({ id: newLogId, message: 'Meal log recorded successfully' });
+    await client.query('COMMIT');
+    res.status(201).json({ id: info.rows[0].id, message: 'Meal log recorded successfully' });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error recording meal log:', error);
     res.status(500).json({ error: 'Failed to record meal log' });
+  } finally {
+    client.release();
   }
 });
 
 // 12. DELETE /api/meal-logs/:id - Delete/undo log
-app.delete('/api/meal-logs/:id', authMiddleware, (req, res) => {
+app.delete('/api/meal-logs/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     
-    // Only delete if the log belongs to a customer owned by req.user.id
-    const result = db.prepare(`
+    const result = await db.query(`
       DELETE FROM meal_logs 
-      WHERE id = ? AND customer_id IN (SELECT id FROM customers WHERE user_id = ?)
-    `).run(id, req.user.id);
+      WHERE id = $1 AND customer_id IN (SELECT id FROM customers WHERE user_id = $2)
+    `, [id, req.user.id]);
     
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Meal log not found or unauthorized' });
     }
     
@@ -604,17 +641,17 @@ app.delete('/api/meal-logs/:id', authMiddleware, (req, res) => {
 });
 
 // 13. GET /api/customers/:id/payments - Fetch payments
-app.get('/api/customers/:id/payments', authMiddleware, (req, res) => {
+app.get('/api/customers/:id/payments', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     
-    const customer = db.prepare('SELECT id FROM customers WHERE id = ? AND user_id = ?').get(id, req.user.id);
-    if (!customer) {
+    const customerRes = await db.query('SELECT id FROM customers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+    if (customerRes.rows.length === 0) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    const payments = db.prepare('SELECT * FROM payments WHERE customer_id = ? ORDER BY payment_date DESC').all(id);
-    res.json(payments);
+    const paymentsRes = await db.query('SELECT * FROM payments WHERE customer_id = $1 ORDER BY payment_date DESC', [id]);
+    res.json(paymentsRes.rows.map(p => ({ ...p, amount: parseFloat(p.amount) })));
   } catch (error) {
     console.error('Error fetching payments:', error);
     res.status(500).json({ error: 'Failed to fetch payments' });
@@ -622,7 +659,8 @@ app.get('/api/customers/:id/payments', authMiddleware, (req, res) => {
 });
 
 // 14. POST /api/customers/:id/payments - Add payment
-app.post('/api/customers/:id/payments', authMiddleware, (req, res) => {
+app.post('/api/customers/:id/payments', authMiddleware, async (req, res) => {
+  const client = await db.connect();
   try {
     const { id } = req.params;
     const { amount, payment_date, notes } = req.body;
@@ -632,57 +670,64 @@ app.post('/api/customers/:id/payments', authMiddleware, (req, res) => {
     }
     
     // Check owner
-    const customer = db.prepare('SELECT id, plan_amount, amount_paid FROM customers WHERE id = ? AND user_id = ?').get(id, req.user.id);
+    const customerRes = await client.query('SELECT id, plan_amount, amount_paid FROM customers WHERE id = $1 AND user_id = $2', [id, req.user.id]);
+    const customer = customerRes.rows[0];
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
     const paymentAmt = parseFloat(amount);
     
-    const paymentTransaction = db.transaction(() => {
-      db.prepare(`
-        INSERT INTO payments (customer_id, amount, payment_date, notes)
-        VALUES (?, ?, ?, ?)
-      `).run(id, paymentAmt, payment_date, notes || '');
-      
-      db.prepare(`
-        UPDATE customers 
-        SET amount_paid = amount_paid + ? 
-        WHERE id = ?
-      `).run(paymentAmt, id);
-      
-      return db.prepare('SELECT amount_paid, plan_amount FROM customers WHERE id = ?').get(id);
-    });
+    await client.query('BEGIN');
     
-    const updatedCustomer = paymentTransaction();
+    await client.query(`
+      INSERT INTO payments (customer_id, amount, payment_date, notes)
+      VALUES ($1, $2, $3, $4)
+    `, [id, paymentAmt, payment_date, notes || '']);
+    
+    const updateRes = await client.query(`
+      UPDATE customers 
+      SET amount_paid = amount_paid + $1 
+      WHERE id = $2
+      RETURNING amount_paid, plan_amount
+    `, [paymentAmt, id]);
+    
+    await client.query('COMMIT');
+    
+    const updatedCustomer = updateRes.rows[0];
     res.status(201).json({ 
       message: 'Payment recorded successfully', 
-      amount_paid: updatedCustomer.amount_paid,
-      pending_payment: updatedCustomer.plan_amount - updatedCustomer.amount_paid
+      amount_paid: parseFloat(updatedCustomer.amount_paid),
+      pending_payment: parseFloat(updatedCustomer.plan_amount) - parseFloat(updatedCustomer.amount_paid)
     });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error recording payment:', error);
     res.status(500).json({ error: 'Failed to record payment' });
+  } finally {
+    client.release();
   }
 });
 
 // 15. GET /api/stats - Dashboard summary statistics
-app.get('/api/stats', authMiddleware, (req, res) => {
+app.get('/api/stats', authMiddleware, async (req, res) => {
   try {
     const activeMonth = req.query.month || getCurrentMonthString(); // YYYY-MM
     
     // A. Active Customers
-    const { active_count } = db.prepare('SELECT COUNT(*) as active_count FROM customers WHERE active = 1 AND user_id = ?').get(req.user.id);
+    const activeCountRes = await db.query('SELECT COUNT(*) as active_count FROM customers WHERE active = 1 AND user_id = $1', [req.user.id]);
+    const active_count = parseInt(activeCountRes.rows[0].active_count) || 0;
     
     // B. Total Pending Payments (from active customers)
-    const { total_pending_payment } = db.prepare(`
+    const pendingPaymentRes = await db.query(`
       SELECT SUM(CASE WHEN plan_amount > amount_paid THEN plan_amount - amount_paid ELSE 0 END) as total_pending_payment 
       FROM customers 
-      WHERE active = 1 AND user_id = ?
-    `).get(req.user.id);
+      WHERE active = 1 AND user_id = $1
+    `, [req.user.id]);
+    const total_pending_payment = parseFloat(pendingPaymentRes.rows[0].total_pending_payment) || 0;
     
     // C. Total Pending Meals (for active plans)
-    const { total_pending_meals } = db.prepare(`
+    const pendingMealsRes = await db.query(`
       SELECT 
         COALESCE(SUM(
           CASE 
@@ -700,32 +745,34 @@ app.get('/api/stats', authMiddleware, (req, res) => {
         FROM meal_logs
         GROUP BY customer_id
       ) l ON c.id = l.customer_id
-      WHERE c.active = 1 AND c.user_id = ?
-    `).get(req.user.id);
+      WHERE c.active = 1 AND c.user_id = $1
+    `, [req.user.id]);
+    const total_pending_meals = parseInt(pendingMealsRes.rows[0].total_pending_meals) || 0;
     
     // D. Collected This Month
-    // Query payments joined to scoped customers matching YYYY-MM
-    const { collected_this_month } = db.prepare(`
+    const collectedRes = await db.query(`
       SELECT COALESCE(SUM(p.amount), 0) as collected_this_month 
       FROM payments p
       JOIN customers c ON p.customer_id = c.id
-      WHERE strftime('%Y-%m', p.payment_date) = ? AND c.user_id = ?
-    `).get(activeMonth, req.user.id);
+      WHERE substring(p.payment_date from 1 for 7) = $1 AND c.user_id = $2
+    `, [activeMonth, req.user.id]);
+    const collected_this_month = parseFloat(collectedRes.rows[0].collected_this_month) || 0;
 
     // E. Expenses This Month
-    const { expenses_this_month } = db.prepare(`
+    const expensesRes = await db.query(`
       SELECT COALESCE(SUM(amount), 0) as expenses_this_month
       FROM expenses
-      WHERE strftime('%Y-%m', expense_date) = ? AND user_id = ?
-    `).get(activeMonth, req.user.id);
+      WHERE substring(expense_date from 1 for 7) = $1 AND user_id = $2
+    `, [activeMonth, req.user.id]);
+    const expenses_this_month = parseFloat(expensesRes.rows[0].expenses_this_month) || 0;
     
     res.json({
-      active_customers: active_count || 0,
-      pending_payments: total_pending_payment || 0,
-      pending_meals: total_pending_meals || 0,
-      collected_this_month: collected_this_month || 0,
-      expenses_this_month: expenses_this_month || 0,
-      net_revenue: (collected_this_month || 0) - (expenses_this_month || 0)
+      active_customers: active_count,
+      pending_payments: total_pending_payment,
+      pending_meals: total_pending_meals,
+      collected_this_month: collected_this_month,
+      expenses_this_month: expenses_this_month,
+      net_revenue: collected_this_month - expenses_this_month
     });
   } catch (error) {
     console.error('Error fetching dashboard stats:', error);
@@ -734,10 +781,10 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // 16. GET /api/expenses - Get all scoped expenses
-app.get('/api/expenses', authMiddleware, (req, res) => {
+app.get('/api/expenses', authMiddleware, async (req, res) => {
   try {
-    const expenses = db.prepare('SELECT * FROM expenses WHERE user_id = ? ORDER BY expense_date DESC, id DESC').all(req.user.id);
-    res.json(expenses);
+    const expensesRes = await db.query('SELECT * FROM expenses WHERE user_id = $1 ORDER BY expense_date DESC, id DESC', [req.user.id]);
+    res.json(expensesRes.rows.map(e => ({ ...e, amount: parseFloat(e.amount) })));
   } catch (error) {
     console.error('Error fetching expenses:', error);
     res.status(500).json({ error: 'Failed to fetch expenses' });
@@ -745,18 +792,19 @@ app.get('/api/expenses', authMiddleware, (req, res) => {
 });
 
 // 17. POST /api/expenses - Record a new scoped expense
-app.post('/api/expenses', authMiddleware, (req, res) => {
+app.post('/api/expenses', authMiddleware, async (req, res) => {
   try {
     const { title, amount, expense_date, category, notes } = req.body;
     if (!title || amount === undefined || !expense_date) {
       return res.status(400).json({ error: 'Missing title, amount, or expense_date' });
     }
-    const info = db.prepare(`
+    const info = await db.query(`
       INSERT INTO expenses (user_id, title, amount, expense_date, category, notes)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(req.user.id, title, parseFloat(amount), expense_date, category || 'Other', notes || '');
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+    `, [req.user.id, title, parseFloat(amount), expense_date, category || 'Other', notes || '']);
     
-    res.status(201).json({ id: info.lastInsertRowid, message: 'Expense recorded successfully' });
+    res.status(201).json({ id: info.rows[0].id, message: 'Expense recorded successfully' });
   } catch (error) {
     console.error('Error creating expense:', error);
     res.status(500).json({ error: 'Failed to record expense' });
@@ -764,12 +812,12 @@ app.post('/api/expenses', authMiddleware, (req, res) => {
 });
 
 // 18. DELETE /api/expenses/:id - Delete scoped expense record
-app.delete('/api/expenses/:id', authMiddleware, (req, res) => {
+app.delete('/api/expenses/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    const result = db.prepare('DELETE FROM expenses WHERE id = ? AND user_id = ?').run(id, req.user.id);
+    const result = await db.query('DELETE FROM expenses WHERE id = $1 AND user_id = $2', [id, req.user.id]);
     
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Expense record not found or unauthorized' });
     }
     
@@ -785,6 +833,12 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date() });
 });
 
-app.listen(PORT, () => {
-  console.log(`Tracky backend REST API running on port ${PORT}`);
+app.listen(PORT, async () => {
+  try {
+    await initializeDatabase();
+    console.log(`Tracky backend REST API running on port ${PORT}`);
+  } catch (err) {
+    console.error('Failed to start server due to database initialization error:', err);
+    process.exit(1);
+  }
 });
