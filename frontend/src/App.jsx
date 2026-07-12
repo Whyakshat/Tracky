@@ -167,8 +167,8 @@ export default function App() {
       await fetchData();
       showToast(
         isEditing 
-          ? `✅ "${formData.name}" ka plan update ho gaya!` 
-          : `✅ "${formData.name}" successfully add ho gaya!`,
+          ? `✅ "${formData.name}"'s plan was updated successfully!` 
+          : `✅ "${formData.name}" was added successfully!`,
         'success'
       );
     } catch (err) {
@@ -185,7 +185,7 @@ export default function App() {
       });
       if (!res.ok) throw new Error('Failed to delete customer');
       await fetchData();
-      showToast(`🗑️ "${customerName}" delete ho gaya.`, 'success');
+      showToast(`🗑️ "${customerName}" was deleted successfully.`, 'success');
     } catch (err) {
       showToast(`❌ Error: ${err.message}`, 'error');
     }

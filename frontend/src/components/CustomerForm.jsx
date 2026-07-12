@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Save } from 'lucide-react';
+import { X, Save, Loader2 } from 'lucide-react';
 
 export default function CustomerForm({ customer, onClose, onSave }) {
   // Retrieve settings
@@ -70,10 +70,18 @@ export default function CustomerForm({ customer, onClose, onSave }) {
     return Object.keys(tempErrors).length === 0;
   };
 
-  const handleSubmit = (e) => {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validate()) return;
-    onSave(formData);
+    
+    setIsSubmitting(true);
+    try {
+      await onSave(formData);
+    } finally {
+      setIsSubmitting(false); // In case onSave doesn't unmount the form
+    }
   };
 
   const inputClass = "w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-slate-600 transition-all";
@@ -289,10 +297,11 @@ export default function CustomerForm({ customer, onClose, onSave }) {
           <button 
             type="button"
             onClick={handleSubmit}
-            className="px-5 py-2 bg-white text-black hover:bg-slate-200 rounded-lg text-xs font-semibold uppercase tracking-wider flex items-center space-x-2 shadow-lg transition-all active:scale-97"
+            disabled={isSubmitting}
+            className={`px-5 py-2 bg-white text-black hover:bg-slate-200 rounded-lg text-xs font-semibold uppercase tracking-wider flex items-center space-x-2 shadow-lg transition-all active:scale-97 ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
-            <Save className="h-4 w-4" />
-            <span>Confirm Plan</span>
+            {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            <span>{isSubmitting ? 'Saving...' : 'Confirm Plan'}</span>
           </button>
         </div>
 

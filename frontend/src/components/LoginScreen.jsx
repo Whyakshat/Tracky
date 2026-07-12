@@ -187,7 +187,7 @@ export default function LoginScreen({ onLoginSuccess }) {
           {/* Submit button */}
           <button
             type="submit"
-            disabled={loading || !isServerReady}
+            disabled={loading}
             className="w-full py-3 bg-white text-black hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-bold uppercase tracking-wider flex items-center justify-center space-x-2 transition-all active:scale-98 shadow-md"
           >
             {loading
@@ -208,7 +208,7 @@ export default function LoginScreen({ onLoginSuccess }) {
         </div>
 
         {/* Google Authentication button */}
-        <div className={`flex justify-center transition-opacity duration-300 ${!isServerReady ? 'opacity-40 pointer-events-none' : 'opacity-100'}`}>
+        <div className="flex justify-center">
           <GoogleLogin
             onSuccess={handleGoogleAuth}
             onError={() => setError('Google Login Failed')}
