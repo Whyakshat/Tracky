@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
-  Plus, Search, ArrowUpDown, CreditCard, 
+  Plus, Search, CreditCard, 
   LayoutDashboard, CalendarDays, Tag, Settings, 
-  AlertCircle, RefreshCw, LogOut, ChevronRight
+  AlertCircle, RefreshCw, CheckCircle2, XCircle
 } from 'lucide-react';
 import { API_URL } from './config';
 import StatsBar from './components/StatsBar';
@@ -33,6 +33,17 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // Toast notifications
+  const [toasts, setToasts] = useState([]);
+
+  const showToast = useCallback((message, type = 'success') => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 3500);
+  }, []);
 
   // Search, Filters & Sorting
   const [searchTerm, setSearchTerm] = useState('');
@@ -130,8 +141,9 @@ export default function App() {
     try {
       let url = `${API_URL}/customers`;
       let method = 'POST';
+      const isEditing = !!editingCustomer;
 
-      if (editingCustomer) {
+      if (isEditing) {
         url = `${API_URL}/customers/${editingCustomer.id}`;
         method = 'PUT';
       }
@@ -152,22 +164,30 @@ export default function App() {
 
       setShowFormModal(false);
       setEditingCustomer(null);
-      fetchData();
+      await fetchData();
+      showToast(
+        isEditing 
+          ? `✅ "${formData.name}" ka plan update ho gaya!` 
+          : `✅ "${formData.name}" successfully add ho gaya!`,
+        'success'
+      );
     } catch (err) {
-      alert(err.message);
+      showToast(`❌ Error: ${err.message}`, 'error');
     }
   };
 
   const handleDeleteCustomer = async (id) => {
+    const customerName = customers.find(c => c.id === id)?.name || 'Customer';
     try {
       const res = await fetch(`${API_URL}/customers/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (!res.ok) throw new Error('Failed to delete customer');
-      fetchData();
+      await fetchData();
+      showToast(`🗑️ "${customerName}" delete ho gaya.`, 'success');
     } catch (err) {
-      alert(err.message);
+      showToast(`❌ Error: ${err.message}`, 'error');
     }
   };
 
@@ -734,6 +754,28 @@ export default function App() {
           userSettings={user}
         />
       )}
+
+      {/* -------------------- TOAST NOTIFICATIONS -------------------- */}
+      <div className="fixed top-5 right-5 z-[100] flex flex-col gap-2 pointer-events-none">
+        {toasts.map(toast => (
+          <div
+            key={toast.id}
+            className={`flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl border text-xs font-bold pointer-events-auto
+              animate-[slideInRight_0.3s_ease-out]
+              ${
+                toast.type === 'success'
+                  ? 'bg-[#0d1f0d] border-green-800/50 text-green-300'
+                  : 'bg-[#1f0d0d] border-red-800/50 text-red-300'
+              }`}
+          >
+            {toast.type === 'success'
+              ? <CheckCircle2 className="h-4 w-4 flex-shrink-0 text-green-400" />
+              : <XCircle className="h-4 w-4 flex-shrink-0 text-red-400" />
+            }
+            <span>{toast.message}</span>
+          </div>
+        ))}
+      </div>
 
     </div>
   );
